@@ -15,3 +15,4 @@ class InvestigationResult(BaseModel):
     findings: List[Finding]
     uncertainties: List[str]
     next_actions: List[str]
+    

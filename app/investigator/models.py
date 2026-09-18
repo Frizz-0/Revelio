@@ -21,3 +21,13 @@ class Evidence(BaseModel):
     claim: str
     supporting_text: str
     relevance: float = Field(ge=0, le=1)
+
+class SearchResult(BaseModel):
+    title: str
+    url: str
+    snippet: str
+
+class Document(BaseModel):
+    title: str
+    url: str
+    content: str
