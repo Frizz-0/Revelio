@@ -7,7 +7,7 @@ from app.investigator.models import SearchResult
 
 class SearchProvider:
 
-    def search(self, query: str, max_results: int = 5):
+    def search(self, query: str, max_results: int = 3):
         raise NotImplementedError
 
 
@@ -29,7 +29,7 @@ class SearXNGProvider(SearchProvider):
         })
 
         # Prevent rapid-fire requests to SearXNG
-        self.request_delay = 1.0
+        self.request_delay = 0.2
         self.last_request_time = 0.0
 
     def _wait_before_request(self):
@@ -40,7 +40,7 @@ class SearXNGProvider(SearchProvider):
 
         self.last_request_time = time.time()
 
-    def search(self, query: str, max_results: int = 5):
+    def search(self, query: str, max_results: int = 3):
 
         self._wait_before_request()
 
@@ -51,12 +51,19 @@ class SearXNGProvider(SearchProvider):
                     "q": query,
                     "format": "json",
                 },
-                timeout=(5, 15),
+                timeout=(3, 5),
             )
 
             response.raise_for_status()
 
             data = response.json()
+            print(f"[Search] URL: {response.url}")
+            print(f"[Search] Status: {response.status_code}")
+            print(f"[Search] Raw result count: {len(data.get('results', []))}")
+
+            if not data.get("results"):
+                print("[Search] SearXNG returned 0 results")
+                print(f"[Search] Unresponsive engines: {data.get('unresponsive_engines')}")
 
         except requests.exceptions.Timeout:
             print(f"[Search] Timeout: {query}")

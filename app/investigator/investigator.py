@@ -34,7 +34,7 @@ class Investigator:
 
             queries = self.query_generator.generate_queries(
                 sub_question,
-                max_queries=4,
+                max_queries=2,
                 time_context="current"
             )
 
@@ -61,6 +61,11 @@ class Investigator:
                     max_results=3
                 )
 
+                print(
+                    f"[Investigator] Query={query!r}, "
+                    f"returned={len(results)}"
+                )
+                
                 all_results.extend(results)
 
             # -----------------------------------------
@@ -86,27 +91,27 @@ class Investigator:
             # Fetch documents
             # -----------------------------------------
 
-            for result in unique_results:
+            # for result in unique_results:
 
-                print("\nSOURCE:")
-                print(result.title)
-                print(result.url)
+            #     print("\nSOURCE:")
+            #     print(result.title)
+            #     print(result.url)
 
-                try:
+            #     try:
 
-                    document = self.fetcher.fetch(result)
+            #         document = self.fetcher.fetch(result)
 
-                    if document is None:
-                        print("Skipping source.")
-                        continue
+            #         if document is None:
+            #             print("Skipping source.")
+            #             continue
 
-                    print(
-                        f"Downloaded "
-                        f"{len(document.content)} characters"
-                    )
+            #         print(
+            #             f"Downloaded "
+            #             f"{len(document.content)} characters"
+            #         )
 
-                except Exception as e:
+            #     except Exception as e:
 
-                    print(f"Failed to fetch: {e}")
+            #         print(f"Failed to fetch: {e}")
 
         return plan
