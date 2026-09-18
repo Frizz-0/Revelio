@@ -1,17 +1,7 @@
-from app.services.search_service import SearXNGProvider
+from app.investigator.investigator import Investigator
 
+investigator = Investigator()
 
-search = SearXNGProvider()
-
-results = search.search(
-    "NVIDIA AI GPU market share",
-    max_results=5
+investigator.investigate(
+    "Is NVIDIA's dominance in AI GPUs sustainable?"
 )
-
-print(f"\nFound {len(results)} results\n")
-
-for result in results:
-    print(result.title)
-    print(result.url)
-    print(result.snippet)
-    print("-" * 60)

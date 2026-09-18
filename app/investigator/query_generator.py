@@ -1,7 +1,85 @@
 import json
 
 from app.services.llm import LLMService
+from app.investigator.planner import InvestigationPlanner
 
+
+# response_format = {
+#     "type": "json_schema",
+#     "json_schema": {
+#         "name": "search_queries",
+#         "strict": True,
+#         "schema": {
+#             "type": "object",
+#             "properties": {
+#                 "queries": {
+#                     "type": "array",
+#                     "items": {
+#                         "type": "string"
+#                     },
+#                     "minItems": 4,
+#                     "maxItems": 4
+#                 }
+#             },
+#             "required": ["queries"],
+#             "additionalProperties": False
+#         }
+#     }
+# }
+response_format = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "investigation_plan",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string"
+                },
+                "sub_questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "evidence_required": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "assumptions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "ambiguities": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "research_strategy": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            },
+            "required": [
+                "objective",
+                "sub_questions",
+                "evidence_required",
+                "assumptions",
+                "ambiguities",
+                "research_strategy"
+            ],
+            "additionalProperties": False
+        }
+    }
+}
 
 class QueryGenerator:
 
@@ -73,7 +151,7 @@ class QueryGenerator:
 
         When investigating whether an event or action exists,
         phrase the query neutrally rather than presupposing it.
-        
+
         Do not assume a historical time period unless the
         sub-question explicitly specifies one.
 
@@ -118,9 +196,15 @@ class QueryGenerator:
             }
         ]
 
-        raw_response = self.llm.generate(messages)
+        # raw_response = self.llm.generate(messages)
+        raw_response = self.llm.generate(messages,response_format=response_format)
+
+        print("\n=== RAW QUERY GENERATOR RESPONSE ===")
+        print(repr(raw_response))
+        print("====================================\n")
 
         data = json.loads(raw_response)
+        plan = InvestigationPlan(**data)
 
         queries = data.get("queries", [])
 
