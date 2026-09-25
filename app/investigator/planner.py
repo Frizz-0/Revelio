@@ -48,9 +48,9 @@ Return ONLY valid JSON matching this structure:
 
         raw_response = self.llm.generate(messages)
 
-        print("\n=== RAW GROQ RESPONSE ===")
-        print(repr(raw_response))
-        print("=========================\n")
+        # print("\n=== RAW GROQ RESPONSE ===")
+        # print(repr(raw_response))
+        # print("=========================\n")
 
         data = json.loads(raw_response)
 

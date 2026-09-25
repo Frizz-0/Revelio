@@ -92,3 +92,5 @@ for i, item in enumerate(evidence, 1):
 
     print("\nSource:")
     print(item.url)
+    
+    print(f"Evidence Type: {item.evidence_type}")
