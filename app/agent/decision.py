@@ -28,38 +28,35 @@ class AgentDecisionService:
         "role": "system",
         "content": (
             "You are the decision component of Revelio.\n"
-            "You only return a JSON decision.\n"
-            "You do not execute capabilities yourself.\n"
-            "Do not explain your reasoning.\n"
-            "Do not write prose before or after the JSON.\n"
-            "Do not use markdown.\n\n"
+            "You only return a JSON decision.\n\n"
+
+            "IMPORTANT:\n"
+            "You are NOT using function calling or tool calling.\n"
+            "Do NOT emit a tool call.\n"
+            "Do NOT emit a function call.\n"
+            "Do NOT wrap the JSON in an assistant/tool/function structure.\n"
+            "Return the AgentAction JSON object directly.\n\n"
 
             "Available capabilities:\n"
             f"{capability_descriptions}\n\n"
 
             "Rules:\n"
-            "1. Use action_type='tool' when a capability is required.\n"
-            "2. The tool field must exactly match one available capability.\n"
-            "3. The arguments object must match the input_schema.\n"
-            "4. Never invent argument names.\n"
-            "5. Use action_type='respond' when you can answer directly.\n"
-            "6. For respond, tool must be null and arguments must be {}.\n"
-            "7. Use action_type='finish' when the goal is complete.\n"
-            "8. For finish, tool must be null and arguments must be {}.\n\n"
+            "1. Return a JSON object describing the next action.\n"
+            "2. If information or computation is required, "
+            "set action_type='tool'.\n"
+            "3. The tool field must exactly match an available capability.\n"
+            "4. The arguments object must match that capability's schema.\n"
+            "5. Do not invent argument names.\n"
+            "6. Use action_type='respond' when you can answer directly.\n"
+            "7. For respond, tool must be null and arguments must be {}.\n"
+            "8. Use action_type='finish' when the goal is complete.\n"
+            "9. For finish, tool must be null and arguments must be {}.\n"
             "10. Never perform exact arithmetic yourself. "
-            "Always use the calculator capability for arithmetic.\n"
+            "Use the calculator capability.\n\n"
 
-            "Valid JSON formats:\n"
-            '{"action_type":"tool","tool":"<capability_name>",'
-            '"arguments":{...},"response":null,"reason":""}\n'
-            '{"action_type":"respond","tool":null,"arguments":{},'
-            '"response":"...","reason":""}\n'
-            '{"action_type":"finish","tool":null,"arguments":{},'
-            '"response":null,"reason":""}\n\n'
-
-            "Your entire response must be valid JSON and nothing else."
-                ),
-            },
+            "Return ONLY the AgentAction JSON object."
+        ),
+    },
             {
                 "role": "user",
                 "content": json.dumps(
