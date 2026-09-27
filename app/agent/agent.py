@@ -1,7 +1,7 @@
 """The investigation agent loop and its small runtime data models."""
 
 import json
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -41,12 +41,22 @@ class AgentState(BaseModel):
 class Agent:
     """Choose, execute, and observe capability actions until answering."""
 
-    def __init__(self, capabilities, max_tool_calls: int = 5):
+    def __init__(
+        self,
+        capabilities,
+        max_tool_calls: int = 5,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+    ):
         from app.services.model_router import ModelRouter
 
         self.capabilities = capabilities
         self.max_tool_calls = max_tool_calls
+        self.on_event = on_event
         self.model = ModelRouter()
+
+    def _emit(self, event: str, **details: Any) -> None:
+        if self.on_event is not None:
+            self.on_event({"event": event, **details})
 
     def _decide(self, state: AgentState) -> AgentAction:
         messages = [
@@ -65,9 +75,13 @@ class Agent:
                     "Never calculate exact arithmetic yourself: call calculator "
                     "and use its observed result. For factual research, use the "
                     "search capability first, then use research on those actual "
-                    "search observations before answering. Research performs both "
-                    "analysis and evidence verification. Do not invent or resend "
-                    "evidence in research arguments. "
+                    "search observations before answering. Research fetches source "
+                    "pages, extracts exact quotations, and verifies a finding "
+                    "against those quotations. Base synthesis on the verified "
+                    "finding, cite its source URLs, never present a single-source "
+                    "finding as established fact, and state uncertainty or "
+                    "insufficient evidence. Do not invent or resend evidence in "
+                    "research arguments. "
                     "Do not use finish; respond with the answer."
                 ),
             },
@@ -100,7 +114,7 @@ class Agent:
                 f"{recovered.tool}"
             )
             return recovered
-        action = AgentAction.model_validate_json(raw)
+        action = self._normalize_action(AgentAction.model_validate_json(raw))
 
         if action.action_type == "respond" and not action.response:
             correction = messages + [
@@ -119,7 +133,36 @@ class Agent:
                 response_format={"type": "json_object"},
                 capability="reasoning",
             )
-            action = AgentAction.model_validate_json(raw)
+            action = self._normalize_action(AgentAction.model_validate_json(raw))
+        if action.action_type == "respond" and action.response and (
+            action.tool is not None or action.arguments
+        ):
+            print("[Agent] Ignoring stray tool fields on a completed response action.")
+            action = action.model_copy(update={"tool": None, "arguments": {}})
+        return action
+
+    @staticmethod
+    def _normalize_action(action: AgentAction) -> AgentAction:
+        """Repair the common JSON shape where the model calls respond a tool."""
+        if action.action_type == "tool" and action.tool == "respond":
+            response = action.response
+            if not response:
+                response = next(
+                    (
+                        action.arguments.get(key)
+                        for key in ("response", "answer", "content")
+                        if isinstance(action.arguments.get(key), str)
+                        and action.arguments.get(key).strip()
+                    ),
+                    None,
+                )
+            if response:
+                print("[Agent] Normalized respond mislabeled as a tool action.")
+                return AgentAction(
+                    action_type="respond",
+                    response=response,
+                    reason=action.reason,
+                )
         return action
 
     def _recover_provider_tool_call(self, error: Exception) -> AgentAction | None:
@@ -140,17 +183,67 @@ class Agent:
         if not isinstance(payload, dict):
             return None
 
-        name = payload.get("name") or payload.get("tool")
-        arguments = payload.get("arguments", {})
         available = {item["name"] for item in self.capabilities.describe()}
-        if name not in available or not isinstance(arguments, dict):
+
+        def unpack(candidate: Any) -> AgentAction | None:
+            if isinstance(candidate, str):
+                try:
+                    candidate = json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+            if not isinstance(candidate, dict):
+                return None
+
+            # Recover valid final-answer actions nested in a provider wrapper.
+            if candidate.get("action_type") == "respond":
+                response = candidate.get("response") or candidate.get("answer")
+                if isinstance(response, str) and response.strip():
+                    return AgentAction(
+                        action_type="respond",
+                        response=response,
+                        reason=candidate.get("reason", "Recovered final answer from provider output."),
+                    )
+
+            # Some Groq responses wrap Revelio's JSON decision as the
+            # arguments to a provider-level agent function.
+            if candidate.get("action_type") == "tool":
+                tool = candidate.get("tool")
+                arguments = candidate.get("arguments", {})
+                if tool == "respond":
+                    response = candidate.get("response")
+                    if not response and isinstance(arguments, dict):
+                        response = arguments.get("response") or arguments.get("answer") or arguments.get("content")
+                    if isinstance(response, str) and response.strip():
+                        return AgentAction(
+                            action_type="respond",
+                            response=response,
+                            reason=candidate.get("reason", "Recovered final answer from provider output."),
+                        )
+                if tool in available and isinstance(arguments, dict):
+                    return AgentAction(
+                        action_type="tool",
+                        tool=tool,
+                        arguments=arguments,
+                        reason="Recovered a nested Revelio action from provider output.",
+                    )
+
+            name = candidate.get("name") or candidate.get("tool")
+            arguments = candidate.get("arguments", {})
+            if name in available and isinstance(arguments, dict):
+                return AgentAction(
+                    action_type="tool",
+                    tool=name,
+                    arguments=arguments,
+                    reason="Recovered the registered capability from provider output.",
+                )
+
+            for key in ("arguments", "input", "parameters", "action"):
+                recovered_action = unpack(candidate.get(key))
+                if recovered_action is not None:
+                    return recovered_action
             return None
-        return AgentAction(
-            action_type="tool",
-            tool=name,
-            arguments=arguments,
-            reason="Recovered the registered capability from provider output.",
-        )
+
+        return unpack(payload)
 
     @staticmethod
     def _validate(action: AgentAction) -> str | None:
@@ -181,14 +274,53 @@ class Agent:
 
     @staticmethod
     def _search_evidence(state: AgentState) -> list[dict[str, Any]]:
-        return [
-            item
-            for observation in state.observations
-            if observation.tool == "search" and observation.success
-            and isinstance(observation.output, list)
-            for item in observation.output
-            if isinstance(item, dict)
+        results: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        # Prefer results from the latest query so a follow-up search can add
+        # new evidence instead of repeatedly processing the first results.
+        for observation in reversed(state.observations):
+            if observation.tool != "search" or not observation.success:
+                continue
+            if not isinstance(observation.output, list):
+                continue
+            for item in observation.output:
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("url")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    results.append(item)
+        return results
+
+    @staticmethod
+    def _insufficient_answer(goal: str, research: dict[str, Any]) -> str:
+        finding = research.get("finding") or {}
+        answer = (
+            f"The available evidence does not establish an answer to: {goal}. "
+            "The evidence verifier marked this finding insufficient, so I will not present a conclusion as established."
+        )
+        caveats = finding.get("caveats") or []
+        safe_caveats = []
+        for caveat in caveats:
+            if not isinstance(caveat, str):
+                continue
+            if "rate_limit_exceeded" in caveat or "Rate limit reached" in caveat:
+                safe_caveats.append(
+                    "The evidence verifier hit the model provider's rate limit, so the claims were not verified."
+                )
+            else:
+                safe_caveats.append(caveat)
+        if safe_caveats:
+            answer += "\n\nCaveats: " + " ".join(safe_caveats)
+        sources = research.get("sources") or []
+        source_links = [
+            f"{source.get('title') or source.get('url')}: {source.get('url')}"
+            for source in sources
+            if isinstance(source, dict) and source.get("url")
         ]
+        if source_links:
+            answer += "\n\nSources fetched for review: " + "; ".join(source_links)
+        return answer
 
     @staticmethod
     def _preview(value: Any, limit: int = 700) -> str:
@@ -198,9 +330,11 @@ class Agent:
     def run(self, state: AgentState) -> AgentState:
         state.status = "running"
         print(f"[Agent] Goal: {state.goal}")
+        self._emit("started", goal=state.goal)
 
         while not state.finished:
             state.iteration += 1
+            self._emit("decision_started", step=state.iteration)
             try:
                 action = self._decide(state)
             except Exception as exc:
@@ -211,7 +345,13 @@ class Agent:
                 )
                 state.final_answer = message
                 state.status = "failed"
+                self._emit("failed", error=message, state=state.model_dump(mode="json"))
                 break
+            self._emit(
+                "action_selected",
+                step=state.iteration,
+                action=action.model_dump(mode="json"),
+            )
             print(
                 f"[Agent] Step {state.iteration}: {action.action_type}"
                 + (f" {action.tool}" if action.tool else "")
@@ -235,7 +375,28 @@ class Agent:
                     state.observations.append(
                         AgentObservation(tool="agent", success=False, error=error)
                     )
+                    self._emit("action_rejected", step=state.iteration, error=error)
                     continue
+
+            if (
+                action.action_type == "tool"
+                and action.tool == "search"
+                and any(
+                    observation.tool == "search" and observation.success
+                    for observation in state.observations
+                )
+                and not any(
+                    observation.tool == "research" and observation.success
+                    for observation in state.observations
+                )
+            ):
+                print("[Agent] Reusing collected search results; proceeding to research.")
+                action = AgentAction(
+                    action_type="tool",
+                    tool="research",
+                    arguments={"question": state.goal, "data": self._search_evidence(state)},
+                    reason="Search results are already available; avoid a duplicate search.",
+                )
 
             if action.action_type == "tool" and action.tool == "research":
                 evidence = self._search_evidence(state)
@@ -245,6 +406,7 @@ class Agent:
                     state.observations.append(
                         AgentObservation(tool="agent", success=False, error=error)
                     )
+                    self._emit("action_rejected", step=state.iteration, error=error)
                     continue
                 # Bind research to actual search results, not model-authored data.
                 action = action.model_copy(update={
@@ -254,17 +416,41 @@ class Agent:
                     }
                 })
 
+            if action.action_type == "respond":
+                research = next(
+                    (
+                        observation.output
+                        for observation in reversed(state.observations)
+                        if observation.tool == "research"
+                        and observation.success
+                        and isinstance(observation.output, dict)
+                    ),
+                    None,
+                )
+                finding = research.get("finding") if research else None
+                if isinstance(finding, dict) and finding.get("status") == "insufficient":
+                    action = action.model_copy(update={
+                        "response": self._insufficient_answer(state.goal, research),
+                        "tool": None,
+                        "arguments": {},
+                    })
+                    print("[Agent] Replaced speculative synthesis because evidence is insufficient.")
+                    self._emit("synthesis_guarded", reason="insufficient_evidence")
+
             error = self._validate(action)
             if error:
                 print(f"[Agent] Invalid action: {error}")
                 state.observations.append(AgentObservation(tool="agent", success=False, error=error))
                 state.status = "failed"
+                state.final_answer = error
+                self._emit("failed", error=error, state=state.model_dump(mode="json"))
                 break
 
             if action.action_type in {"respond", "finish"}:
                 state.action_history.append(action)
                 state.final_answer = action.response
                 state.status = "completed"
+                self._emit("completed", state=state.model_dump(mode="json"))
                 break
 
             error = self._check_tool_policy(action, state)
@@ -274,17 +460,39 @@ class Agent:
                     AgentObservation(tool=action.tool or "agent", success=False, error=error)
                 )
                 state.status = "failed"
+                state.final_answer = error
+                self._emit("failed", error=error, state=state.model_dump(mode="json"))
                 break
 
             state.action_history.append(action)
+            self._emit(
+                "tool_started",
+                step=state.iteration,
+                tool=action.tool,
+                arguments=action.arguments,
+            )
             print(f"[Tool] {action.tool} started; arguments={self._preview(action.arguments)}")
             try:
                 output = self.capabilities.execute(action.tool, action.arguments)
                 observation = AgentObservation(tool=action.tool or "", success=True, output=output)
+                self._emit(
+                    "tool_finished",
+                    step=state.iteration,
+                    tool=action.tool,
+                    success=True,
+                    output=output,
+                )
                 print(f"[Tool] {action.tool} succeeded; output={self._preview(output)}")
             except Exception as exc:
                 observation = AgentObservation(
                     tool=action.tool or "",
+                    success=False,
+                    error=str(exc),
+                )
+                self._emit(
+                    "tool_finished",
+                    step=state.iteration,
+                    tool=action.tool,
                     success=False,
                     error=str(exc),
                 )
@@ -294,6 +502,12 @@ class Agent:
         if state.status == "running":
             state.status = "failed"
             state.final_answer = f"Stopped after reaching the {state.max_iterations}-step limit."
+            self._emit(
+                "failed",
+                error=state.final_answer,
+                state=state.model_dump(mode="json"),
+            )
 
         print(f"[Agent] Finished with status={state.status} after {state.iteration} step(s).")
+        self._emit("finished", status=state.status, steps=state.iteration)
         return state

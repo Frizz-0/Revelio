@@ -1,22 +1,26 @@
 """Command-line entry point for the Revelio V1 agent."""
 
 import argparse
+from typing import Any, Callable
 
 from app.agent import Agent, AgentAction, AgentObservation, AgentState
 from app.tools.calculator import calculate, expression_from_goal
 
 
-def run(goal: str) -> AgentState:
+def run(goal: str, on_event: Callable[[dict[str, Any]], None] | None = None) -> AgentState:
     # Pure arithmetic should not spend an LLM call deciding to use Python.
     expression = expression_from_goal(goal)
     if expression is not None:
+        if on_event:
+            on_event({"event": "started", "goal": goal})
+            on_event({"event": "tool_started", "tool": "calculator", "arguments": {"expression": expression}})
         print("[Agent] Routed pure arithmetic to Python calculator; no LLM decision needed.")
         print(f"[Tool] calculator started; expression={expression}")
         try:
             result = calculate(expression)
         except ValueError as exc:
             print(f"[Tool] calculator failed; error={exc}")
-            return AgentState(
+            result = AgentState(
                 goal=goal,
                 status="failed",
                 final_answer=f"Could not calculate that expression: {exc}",
@@ -26,9 +30,14 @@ def run(goal: str) -> AgentState:
                     error=str(exc),
                 )],
             )
+            if on_event:
+                on_event({"event": "tool_finished", "tool": "calculator", "success": False, "error": str(exc)})
+                on_event({"event": "failed", "error": result.final_answer, "state": result.model_dump(mode="json")})
+                on_event({"event": "finished", "status": result.status, "steps": 0})
+            return result
         answer = str(result)
         print(f"[Tool] calculator succeeded; output={answer}")
-        return AgentState(
+        result = AgentState(
             goal=goal,
             status="completed",
             iteration=0,
@@ -45,10 +54,15 @@ def run(goal: str) -> AgentState:
                 output=result,
             )],
         )
+        if on_event:
+            on_event({"event": "tool_finished", "tool": "calculator", "success": True, "output": result.observations[0].output})
+            on_event({"event": "completed", "state": result.model_dump(mode="json")})
+            on_event({"event": "finished", "status": result.status, "steps": 0})
+        return result
 
     from app.agent.capabilities import build_capability_registry
 
-    agent = Agent(capabilities=build_capability_registry())
+    agent = Agent(capabilities=build_capability_registry(on_event=on_event), on_event=on_event)
     return agent.run(AgentState(goal=goal))
 
 

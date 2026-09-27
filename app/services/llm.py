@@ -81,9 +81,21 @@ class LLMService:
         if response_format is not None:
             request["response_format"] = response_format
 
-        response = self.client.chat.completions.create(
-            **request
-        )
+        try:
+            response = self.client.chat.completions.create(**request)
+        except Exception as exc:
+            error_body = getattr(exc, "body", None)
+            details = error_body.get("error", error_body) if isinstance(error_body, dict) else {}
+            error_code = details.get("code") if isinstance(details, dict) else None
+            if response_format and response_format.get("type") == "json_schema" and error_code == "json_validate_failed":
+                # Some provider/model responses fail strict schema validation
+                # despite returning usable JSON. Retry in JSON mode; callers
+                # still parse and validate the resulting object themselves.
+                print("[LLM] Schema validation failed; retrying in JSON object mode")
+                request["response_format"] = {"type": "json_object"}
+                response = self.client.chat.completions.create(**request)
+            else:
+                raise
 
         content = response.choices[0].message.content
 

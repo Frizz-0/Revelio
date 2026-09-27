@@ -139,10 +139,23 @@ Return ONLY the structured JSON response.
         # print("=============================\n")
 
         data = json.loads(raw_response)
+        # JSON-object fallback occasionally returns the evidence array itself
+        # instead of the schema's {"evidence": [...]} wrapper.
+        if isinstance(data, list):
+            data = {"evidence": data}
+        if not isinstance(data, dict):
+            return []
 
         extracted = []
 
-        for item in data.get("evidence", []):
+        items = data.get("evidence", [])
+        if not isinstance(items, list):
+            return []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if not all(isinstance(item.get(key), str) for key in ("claim", "supporting_text")):
+                continue
 
             extracted.append(
                 Evidence(
@@ -152,7 +165,10 @@ Return ONLY the structured JSON response.
                     claim=item["claim"],
                     supporting_text=item["supporting_text"],
                     relevance=item["relevance"],
-                    evidence_type=item["evidence_type"],
+                    # JSON-object fallback can omit this classification even
+                    # when it returned a valid exact quotation. Use the most
+                    # conservative category and retain the evidence for review.
+                    evidence_type=item.get("evidence_type", "source_interpretation"),
                 )
             )
 

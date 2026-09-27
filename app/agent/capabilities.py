@@ -4,10 +4,13 @@ from typing import Any, Callable
 
 from jsonschema import ValidationError, validate
 
+from app.investigator.evidence_extractor import EvidenceExtractor
+from app.investigator.models import Document, Evidence, Finding, SearchResult
+from app.investigator.verifier import EvidenceVerifier
+from app.services.document_parser import DocumentParser
+from app.services.document_service import DocumentFetcher
 from app.services.search_service import SearXNGProvider
-from app.tools.analyzer import Analyzer
 from app.tools.calculator import calculate
-from app.tools.verifier import Verifier
 
 
 class Capability:
@@ -60,20 +63,115 @@ class CapabilityRegistry:
         return capability.execute(arguments)
 
 
-def build_capability_registry() -> CapabilityRegistry:
+def build_capability_registry(
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+) -> CapabilityRegistry:
     """Wire the three capabilities used by the V1 investigation agent."""
     registry = CapabilityRegistry()
     search_provider = SearXNGProvider()
-    analyzer = Analyzer()
-    verifier = Verifier()
+    fetcher = DocumentFetcher()
+    parser = DocumentParser()
+    extractor = EvidenceExtractor()
+    verifier = EvidenceVerifier()
+
+    def emit(event: str, **details: Any) -> None:
+        if on_event is not None:
+            on_event({"event": event, **details})
 
     def search(query: str):
-        return [result.model_dump() for result in search_provider.search(query)]
+        results = [result.model_dump() for result in search_provider.search(query)]
+        emit("search_finished", query=query, result_count=len(results))
+        return results
 
     def research(question: str, data: list[dict]):
-        analysis = analyzer.analyze(question, data)
-        verification = verifier.verify(analysis.get("claims", []), data)
-        return {"analysis": analysis, "verification": verification}
+        """Fetch sources, extract traceable evidence, then verify the finding."""
+        extracted: list[Evidence] = []
+        sources: list[dict[str, str]] = []
+
+        # Try at most three search results, but spend extraction calls on only
+        # the first two pages that can actually be fetched and parsed.
+        for item in data[:3]:
+            result = SearchResult.model_validate(item)
+            print(f"[Research] Fetching source: {result.url}")
+            emit("research_source_started", title=result.title, url=result.url)
+            document = fetcher.fetch(result)
+            if document is None:
+                emit("research_source_finished", title=result.title, url=result.url, success=False, error="Could not fetch source")
+                continue
+
+            text = parser.parse(document)
+            if not text.strip():
+                print(f"[Research] No readable text: {result.url}")
+                emit("research_source_finished", title=result.title, url=result.url, success=False, error="No readable text")
+                continue
+            document = Document(
+                title=document.title,
+                url=document.url,
+                content=text[:24000],
+            )
+            sources.append({"title": document.title, "url": document.url})
+            emit("research_source_finished", title=document.title, url=document.url, success=True)
+            print(f"[Research] Extracting evidence from {document.title}")
+            emit("evidence_extraction_started", title=document.title, url=document.url)
+            try:
+                source_evidence = extractor.extract(question, document)
+            except Exception as exc:
+                # A malformed model response for one page should not discard
+                # evidence already collected or prevent trying another source.
+                print(f"[Research] Evidence extraction failed for {document.url}: {exc}")
+                emit("evidence_extraction_finished", title=document.title, url=document.url, success=False, error=str(exc))
+                continue
+            emit("evidence_extraction_finished", title=document.title, url=document.url, success=True, count=len(source_evidence))
+            for evidence in source_evidence:
+                # The extractor is instructed to copy exact source passages;
+                # enforce that claim in code before evidence reaches verification.
+                if evidence.supporting_text and evidence.supporting_text in document.content:
+                    extracted.append(evidence)
+                else:
+                    print(f"[Research] Discarded non-matching quote: {document.url}")
+            if len(sources) >= 2:
+                break
+
+        if not sources:
+            raise RuntimeError("Could not fetch readable source documents for verification.")
+
+        if extracted:
+            print(f"[Research] Verifying {len(extracted)} evidence item(s)")
+            emit("verification_started", evidence_count=len(extracted), source_count=len(sources))
+            try:
+                finding = verifier.verify(question, extracted)
+            except Exception as exc:
+                print(f"[Research] Verification failed: {exc}")
+                finding = Finding(
+                    sub_question=question,
+                    conclusion="The collected evidence could not be verified in this run.",
+                    status="insufficient",
+                    supporting_evidence=[],
+                    contradicting_evidence=[],
+                    caveats=[f"Verification failed: {exc}"],
+                )
+        else:
+            finding = Finding(
+                sub_question=question,
+                conclusion="The fetched pages did not yield exact, relevant evidence to answer this question.",
+                status="insufficient",
+                supporting_evidence=[],
+                contradicting_evidence=[],
+                caveats=["No source passage passed exact-quote validation."],
+            )
+        independent_source_count = len({item.url for item in extracted})
+        if independent_source_count < 2:
+            finding.status = "insufficient"
+            finding.caveats.append(
+                "Evidence came from fewer than two independent source URLs; "
+                "it is not independently corroborated."
+            )
+        emit("verification_finished", status=finding.status, evidence_count=len(extracted), source_count=independent_source_count)
+        return {
+            "finding": finding.model_dump(mode="json"),
+            "evidence": [item.model_dump(mode="json") for item in extracted],
+            "sources": sources,
+        }
 
     registry.register(Capability(
         name="search",
@@ -89,8 +187,8 @@ def build_capability_registry() -> CapabilityRegistry:
     registry.register(Capability(
         name="research",
         description=(
-            "Analyze supplied search evidence for claims, uncertainties, and "
-            "contradictions, then verify the claims against that evidence."
+            "Fetch and parse search result pages, extract exact quoted evidence "
+            "with source URLs, then verify the finding against the extracted evidence."
         ),
         execute=research,
         input_schema={
