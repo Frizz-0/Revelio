@@ -1,67 +1,26 @@
-# Revelio V2 prototype
+# Active code map
 
-Revelio is an investigation system. Its agent controls a bounded loop: choose
-an action, execute a capability, inspect the observation, then choose again.
+## Runtime flow
 
-## V1 path
+- main.py starts a run and routes plain arithmetic directly to Python.
+- agent/agent.py owns the action loop, run state, and response guardrails.
+- agent/capabilities.py registers search, research, and calculator.
+- services/search_service.py calls SearXNG.
+- services/document_service.py fetches web pages and linked PDFs.
+- services/document_parser.py parses fetched pages and uploaded PDF, DOCX, TXT, Markdown, and HTML files.
+- investigator/evidence_extractor.py extracts exact source passages; investigator/verifier.py evaluates them.
+- services/llm.py calls Groq and maintains the local response cache.
+- api/server.py provides JSON and multipart investigation routes plus streamed events.
+- frontend/src contains the local React investigation UI.
 
-- **Search** retrieves source titles, URLs, and snippets from SearXNG.
-- **Research** fetches and parses up to two search-result pages, extracts
-  exact quoted evidence with URLs, and evaluates findings as supported,
-  contradicted, or insufficient using those passages.
-- **Calculator** evaluates arithmetic in Python. Standalone arithmetic goals
-  are routed directly to it without an LLM call. In mixed tasks, the agent is
-  required to observe a calculator result before it can answer a calculation.
-- **Synthesis** returns the agent's response to the user.
+Uploaded files are parsed in memory, passed into the existing agent state, then reviewed by the same research/extraction/verification flow used for web sources. They are not stored as files by Revelio. To control model cost, only the first 24,000 extracted characters per file are reviewed; Revelio adds a caveat when a file is longer.
 
-The agent loop and investigation capabilities remain separate seams. V2 reuses
-the investigator's source extractor and evidence verifier inside the agent's
-research capability; the old `investigator.investigate()` planner/query loop
-is not used as a second orchestrator.
+## Intentionally removed
 
-The active agent code is kept in two modules: `agent.py` contains the loop,
-state, action model, decision prompt, and guardrails; `capabilities.py` contains
-the capability registry and the default search/research/calculator wiring.
+The old planner/query-generator/investigator orchestration, standalone analyzer and verifier wrappers, unused result model, and no-op model router were not referenced by the active runtime. Their responsibilities either remain in the single active agent flow or were never connected. The active quote extractor and evidence verifier remain.
 
-## Run
+Generated LLM response cache and Python bytecode are runtime artifacts, not source modules; they are left in place. They can be cleared when the app is stopped if you want a cold cache.
 
-From the repository root, set `GROQ_API_KEY` and `SEARXNG_URL` in `.env`, then:
+## Design rule for future work
 
-```powershell
-python -m app.main "Calculate 3847 * 29"
-python -m app.main --debug "Search for NVIDIA AI GPU market share in 2024"
-```
-
-With no goal argument, Revelio prompts for one. Pure arithmetic uses the local
-calculator directly. Research needs Groq and a reachable SearXNG instance.
-Each run prints the selected action and tool success/error. Pass `--debug` to
-also print the complete state with action history and observations.
-
-Search results and research findings are held in the run's in-memory
-observations. PDF support covers text-based PDFs; scanned PDFs need OCR.
-Verification checks what collected passages support and flags disagreement. It
-does not independently establish publisher trustworthiness or prove a claim
-true outside the supplied sources.
-
-## Local UI
-
-The Vite prototype in `frontend/` connects to the local FastAPI event stream.
-Run the API and UI in separate terminals from the repository root:
-
-```powershell
-python -m uvicorn app.api.server:app --reload --port 8000
-cd frontend
-npm run dev
-```
-
-The UI sends an investigation to `POST /api/investigate` and displays streamed
-agent/tool events plus the final state, verified finding, source links, and
-quoted evidence. The API also exposes `GET /api/health`.
-
-## V2 boundaries
-
-One agent, one investigation state (actions and observations), and three
-capabilities. No agent swarm, vector database, voice, vision, or production
-API layer. The local API exists only to connect the prototype UI. There is no
-standalone final-answer proofreader in the current investigator code; V2
-grounds synthesis in verified findings and source URLs.
+For every feature or version, compare Revelio with a general chat app: does the feature improve investigations, traceable evidence, or visibility into the process? Revelio should remain investigation-first. Prefer a small change to the current path over a new subsystem unless the feature needs it.

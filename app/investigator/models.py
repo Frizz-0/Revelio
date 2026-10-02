@@ -1,19 +1,6 @@
 from pydantic import BaseModel, Field
 
 
-class InvestigationPlan(BaseModel):
-    objective: str
-
-    sub_questions: list[str]
-
-    evidence_required: list[str]
-
-    assumptions: list[str]
-
-    ambiguities: list[str]
-
-    research_strategy: list[str]
-
 class Evidence(BaseModel):
     source: str
     title: str
@@ -32,6 +19,7 @@ class Document(BaseModel):
     title: str
     url: str
     content: str
+    truncated: bool = False
 
 class Finding(BaseModel):
     sub_question: str
@@ -40,11 +28,3 @@ class Finding(BaseModel):
     supporting_evidence: list[int]
     contradicting_evidence: list[int]
     caveats: list[str]
-
-class Claim(BaseModel):
-    entity: str
-    metric: str
-    value: float | None
-    unit: str | None
-    time_period: str | None
-    claim_type: str

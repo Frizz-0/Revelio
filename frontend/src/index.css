@@ -31,3 +31,133 @@ input {
 button {
   cursor: pointer;
 }
+
+@keyframes revelio-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes revelio-breathe {
+  0%, 100% { transform: scale(0.96); opacity: 0.82; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+
+@keyframes revelio-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}
+
+.animate-orbit {
+  animation: revelio-orbit 12s linear infinite;
+}
+
+.animate-orbit-reverse {
+  animation: revelio-orbit 9s linear infinite reverse;
+}
+
+.animate-breathe {
+  animation: revelio-breathe 3s ease-in-out infinite;
+}
+
+.hero-glow {
+  animation: revelio-breathe 7s ease-in-out infinite;
+}
+
+.progress-shimmer {
+  background-image: linear-gradient(90deg, #818cf8 0%, #a5f3fc 45%, #818cf8 90%);
+  background-size: 220% 100%;
+  animation: revelio-shimmer 2.4s linear infinite;
+}
+
+.thinking-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #a5b4fc;
+  animation: revelio-breathe 900ms ease-in-out infinite;
+}
+
+.thinking-dot.delay-1 { animation-delay: 120ms; }
+.thinking-dot.delay-2 { animation-delay: 240ms; }
+
+.live-now {
+  isolation: isolate;
+  box-shadow: 0 18px 70px rgba(66, 72, 160, 0.08);
+}
+
+.live-now-wash {
+  z-index: -1;
+  background:
+    radial-gradient(ellipse at 8% 50%, rgba(99, 102, 241, 0.12), transparent 36%),
+    radial-gradient(ellipse at 92% 40%, rgba(34, 211, 238, 0.06), transparent 30%);
+}
+
+.live-orbit.is-active .orbit-ring-one { animation: revelio-orbit 7s linear infinite; }
+.live-orbit.is-active .orbit-ring-two { animation: revelio-orbit 10s linear infinite reverse; }
+.live-orbit.is-active .orbit-ring-three { animation: revelio-orbit 5s linear infinite; }
+
+.orbit-ring {
+  position: absolute;
+  border-radius: 9999px;
+  border: 1px solid rgba(165, 180, 252, 0.16);
+}
+
+.orbit-ring-one { inset: 2px; border-top-color: rgba(165, 180, 252, 0.65); transform: rotate(-25deg); }
+.orbit-ring-two { inset: 10px; border-right-color: rgba(103, 232, 249, 0.55); transform: rotate(30deg); }
+.orbit-ring-three { inset: 18px; border-bottom-color: rgba(165, 180, 252, 0.45); transform: rotate(12deg); }
+.orbit-core { box-shadow: 0 0 34px rgba(129, 140, 248, 0.2); }
+.is-active .orbit-core { animation: revelio-breathe 2.3s ease-in-out infinite; }
+
+.orbit-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #a5f3fc;
+  box-shadow: 0 0 12px rgba(103, 232, 249, 0.9);
+}
+
+.orbit-dot-one { top: 6px; left: 29px; }
+.orbit-dot-two { right: 10px; bottom: 20px; width: 4px; height: 4px; background: #c7d2fe; }
+
+.signal-bar {
+  width: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(to top, rgba(129, 140, 248, 0.4), rgba(165, 243, 252, 0.95));
+  transition: height 500ms ease;
+}
+
+.signal-bar-active { animation: signal-wave 850ms ease-in-out infinite alternate; }
+
+.live-progress-track {
+  height: 2px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.live-progress-track span {
+  display: block;
+  width: 34%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, #818cf8, #a5f3fc, transparent);
+  animation: live-sweep 1.8s ease-in-out infinite;
+}
+
+@keyframes signal-wave {
+  from { transform: scaleY(0.32); opacity: 0.5; }
+  to { transform: scaleY(1); opacity: 1; }
+}
+
+@keyframes live-sweep {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(380%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

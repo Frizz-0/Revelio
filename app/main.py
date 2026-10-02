@@ -1,16 +1,22 @@
-"""Command-line entry point for the Revelio V1 agent."""
+"""Command-line entry point for Revelio investigations."""
 
 import argparse
 from typing import Any, Callable
 
 from app.agent import Agent, AgentAction, AgentObservation, AgentState
+from app.investigator.models import Document
 from app.tools.calculator import calculate, expression_from_goal
 
 
-def run(goal: str, on_event: Callable[[dict[str, Any]], None] | None = None) -> AgentState:
+def run(
+    goal: str,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    documents: list[Document] | None = None,
+) -> AgentState:
+    documents = documents or []
     # Pure arithmetic should not spend an LLM call deciding to use Python.
     expression = expression_from_goal(goal)
-    if expression is not None:
+    if expression is not None and not documents:
         if on_event:
             on_event({"event": "started", "goal": goal})
             on_event({"event": "tool_started", "tool": "calculator", "arguments": {"expression": expression}})
@@ -62,12 +68,29 @@ def run(goal: str, on_event: Callable[[dict[str, Any]], None] | None = None) -> 
 
     from app.agent.capabilities import build_capability_registry
 
-    agent = Agent(capabilities=build_capability_registry(on_event=on_event), on_event=on_event)
-    return agent.run(AgentState(goal=goal))
+    source_items = [
+        {
+            "title": document.title,
+            "url": document.url,
+            "snippet": document.content[:1200],
+            "truncated": document.truncated or len(document.content) > 24000,
+        }
+        for document in documents
+    ]
+    state = AgentState(
+        goal=goal,
+        observations=[AgentObservation(tool="document", success=True, output=source_items)] if source_items else [],
+    )
+    registry = build_capability_registry(
+        on_event=on_event,
+        uploaded_documents={document.url: document for document in documents},
+    )
+    agent = Agent(capabilities=registry, on_event=on_event)
+    return agent.run(state)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Revelio V1 research agent")
+    parser = argparse.ArgumentParser(description="Revelio investigation prototype")
     parser.add_argument("goal", nargs="*", help="Question or task for Revelio")
     parser.add_argument(
         "--debug",

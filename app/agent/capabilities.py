@@ -1,4 +1,4 @@
-"""Capability definitions, registry, and the default V1 investigation tools."""
+"""Capability definitions, registry, and default V2 investigation tools."""
 
 from typing import Any, Callable
 
@@ -65,14 +65,16 @@ class CapabilityRegistry:
 
 def build_capability_registry(
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    uploaded_documents: dict[str, Document] | None = None,
 ) -> CapabilityRegistry:
-    """Wire the three capabilities used by the V1 investigation agent."""
+    """Wire the three capabilities used by the V2 investigation agent."""
     registry = CapabilityRegistry()
     search_provider = SearXNGProvider()
     fetcher = DocumentFetcher()
     parser = DocumentParser()
     extractor = EvidenceExtractor()
     verifier = EvidenceVerifier()
+    uploaded_documents = uploaded_documents or {}
 
     def emit(event: str, **details: Any) -> None:
         if on_event is not None:
@@ -87,19 +89,27 @@ def build_capability_registry(
         """Fetch sources, extract traceable evidence, then verify the finding."""
         extracted: list[Evidence] = []
         sources: list[dict[str, str]] = []
+        truncated_sources: list[str] = []
 
-        # Try at most three search results, but spend extraction calls on only
-        # the first two pages that can actually be fetched and parsed.
-        for item in data[:3]:
+        # Uploaded documents are processed as supplied (up to the API limit);
+        # web research stays limited to two readable pages to control cost.
+        has_uploads = any(
+            isinstance(item, dict) and item.get("url") in uploaded_documents
+            for item in data
+        )
+        source_limit = 3 if has_uploads else 2
+        for item in data[:source_limit]:
             result = SearchResult.model_validate(item)
             print(f"[Research] Fetching source: {result.url}")
             emit("research_source_started", title=result.title, url=result.url)
-            document = fetcher.fetch(result)
+            document = uploaded_documents.get(result.url)
+            if document is None:
+                document = fetcher.fetch(result)
             if document is None:
                 emit("research_source_finished", title=result.title, url=result.url, success=False, error="Could not fetch source")
                 continue
 
-            text = parser.parse(document)
+            text = document.content if result.url in uploaded_documents else parser.parse(document)
             if not text.strip():
                 print(f"[Research] No readable text: {result.url}")
                 emit("research_source_finished", title=result.title, url=result.url, success=False, error="No readable text")
@@ -108,7 +118,10 @@ def build_capability_registry(
                 title=document.title,
                 url=document.url,
                 content=text[:24000],
+                truncated=document.truncated or len(text) > 24000,
             )
+            if document.truncated:
+                truncated_sources.append(document.title)
             sources.append({"title": document.title, "url": document.url})
             emit("research_source_finished", title=document.title, url=document.url, success=True)
             print(f"[Research] Extracting evidence from {document.title}")
@@ -129,7 +142,7 @@ def build_capability_registry(
                     extracted.append(evidence)
                 else:
                     print(f"[Research] Discarded non-matching quote: {document.url}")
-            if len(sources) >= 2:
+            if len(sources) >= source_limit:
                 break
 
         if not sources:
@@ -160,12 +173,27 @@ def build_capability_registry(
                 caveats=["No source passage passed exact-quote validation."],
             )
         independent_source_count = len({item.url for item in extracted})
-        if independent_source_count < 2:
-            finding.status = "insufficient"
+        if truncated_sources:
             finding.caveats.append(
-                "Evidence came from fewer than two independent source URLs; "
-                "it is not independently corroborated."
+                "Only the first 24,000 extracted characters were reviewed for: "
+                + ", ".join(truncated_sources)
+                + "."
             )
+        if independent_source_count < 2:
+            only_uploaded_evidence = bool(extracted) and all(
+                item.url in uploaded_documents for item in extracted
+            )
+            if only_uploaded_evidence:
+                finding.caveats.append(
+                    "This finding is based only on the uploaded document(s) and "
+                    "has not been checked against independent outside sources."
+                )
+            else:
+                finding.status = "insufficient"
+                finding.caveats.append(
+                    "Evidence came from fewer than two independent source URLs; "
+                    "it is not independently corroborated."
+                )
         emit("verification_finished", status=finding.status, evidence_count=len(extracted), source_count=independent_source_count)
         return {
             "finding": finding.model_dump(mode="json"),
@@ -187,8 +215,8 @@ def build_capability_registry(
     registry.register(Capability(
         name="research",
         description=(
-            "Fetch and parse search result pages, extract exact quoted evidence "
-            "with source URLs, then verify the finding against the extracted evidence."
+            "Read uploaded documents or search-result pages, extract exact quoted "
+            "evidence with source URLs, then verify the finding against those passages."
         ),
         execute=research,
         input_schema={

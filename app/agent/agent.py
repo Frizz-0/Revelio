@@ -5,6 +5,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
+from app.services.llm import LLMService
 from app.tools.calculator import goal_requires_calculator
 
 
@@ -47,12 +48,10 @@ class Agent:
         max_tool_calls: int = 5,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ):
-        from app.services.model_router import ModelRouter
-
         self.capabilities = capabilities
         self.max_tool_calls = max_tool_calls
         self.on_event = on_event
-        self.model = ModelRouter()
+        self.model = LLMService()
 
     def _emit(self, event: str, **details: Any) -> None:
         if self.on_event is not None:
@@ -73,9 +72,11 @@ class Agent:
                     "capability and follow its input schema. For respond, provide "
                     "a complete non-empty response, tool=null, and arguments={}. "
                     "Never calculate exact arithmetic yourself: call calculator "
-                    "and use its observed result. For factual research, use the "
-                    "search capability first, then use research on those actual "
-                    "search observations before answering. Research fetches source "
+                    "and use its observed result. For factual research, inspect "
+                    "uploaded documents first when present, and search for outside "
+                    "corroboration or gaps when useful; otherwise search first and "
+                    "research those actual search observations. "
+                    "Research fetches source "
                     "pages, extracts exact quotations, and verifies a finding "
                     "against those quotations. Base synthesis on the verified "
                     "finding, cite its source URLs, never present a single-source "
@@ -103,7 +104,6 @@ class Agent:
             raw = self.model.generate(
                 messages,
                 response_format={"type": "json_object"},
-                capability="reasoning",
             )
         except Exception as exc:
             recovered = self._recover_provider_tool_call(exc)
@@ -131,7 +131,6 @@ class Agent:
             raw = self.model.generate(
                 correction,
                 response_format={"type": "json_object"},
-                capability="reasoning",
             )
             action = self._normalize_action(AgentAction.model_validate_json(raw))
         if action.action_type == "respond" and action.response and (
@@ -273,13 +272,12 @@ class Agent:
         return None
 
     @staticmethod
-    def _search_evidence(state: AgentState) -> list[dict[str, Any]]:
+    def _available_sources(state: AgentState) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
-        # Prefer results from the latest query so a follow-up search can add
-        # new evidence instead of repeatedly processing the first results.
+        # Prefer the latest search results, then include any supplied documents.
         for observation in reversed(state.observations):
-            if observation.tool != "search" or not observation.success:
+            if observation.tool not in {"search", "document"} or not observation.success:
                 continue
             if not isinstance(observation.output, list):
                 continue
@@ -331,6 +329,12 @@ class Agent:
         state.status = "running"
         print(f"[Agent] Goal: {state.goal}")
         self._emit("started", goal=state.goal)
+        documents = next(
+            (item.output for item in state.observations if item.tool == "document" and item.success),
+            [],
+        )
+        if documents:
+            self._emit("documents_loaded", documents=documents)
 
         while not state.finished:
             state.iteration += 1
@@ -364,8 +368,8 @@ class Agent:
                     o.tool == "calculator" and o.success for o in state.observations
                 ):
                     error = "Use calculator and observe its result before answering the requested calculation."
-                elif not self._search_evidence(state):
-                    error = "Search for evidence before answering an investigation goal."
+                elif not self._available_sources(state):
+                    error = "Provide documents or search for evidence before answering an investigation goal."
                 elif not any(
                     o.tool == "research" and o.success for o in state.observations
                 ):
@@ -382,7 +386,7 @@ class Agent:
                 action.action_type == "tool"
                 and action.tool == "search"
                 and any(
-                    observation.tool == "search" and observation.success
+                    observation.tool in {"search", "document"} and observation.success
                     for observation in state.observations
                 )
                 and not any(
@@ -390,25 +394,25 @@ class Agent:
                     for observation in state.observations
                 )
             ):
-                print("[Agent] Reusing collected search results; proceeding to research.")
+                print("[Agent] Reusing supplied documents or search results; proceeding to research.")
                 action = AgentAction(
                     action_type="tool",
                     tool="research",
-                    arguments={"question": state.goal, "data": self._search_evidence(state)},
-                    reason="Search results are already available; avoid a duplicate search.",
+                    arguments={"question": state.goal, "data": self._available_sources(state)},
+                    reason="Source documents are already available; proceed to research.",
                 )
 
             if action.action_type == "tool" and action.tool == "research":
-                evidence = self._search_evidence(state)
+                evidence = self._available_sources(state)
                 if not evidence:
-                    error = "Search for evidence before invoking research."
+                    error = "Provide documents or search for evidence before invoking research."
                     print(f"[Agent] Rejected action: {error}")
                     state.observations.append(
                         AgentObservation(tool="agent", success=False, error=error)
                     )
                     self._emit("action_rejected", step=state.iteration, error=error)
                     continue
-                # Bind research to actual search results, not model-authored data.
+                # Bind research to uploaded or actual search sources, not model-authored data.
                 action = action.model_copy(update={
                     "arguments": {
                         "question": action.arguments.get("question") or state.goal,
