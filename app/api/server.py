@@ -2,6 +2,7 @@
 
 import os
 import json
+import mimetypes
 import queue
 import threading
 from typing import Any
@@ -15,6 +16,8 @@ from pydantic import BaseModel, Field
 
 from app.main import run
 from app.services.document_parser import DocumentParser
+
+from dataclasses import dataclass
 
 app = FastAPI(title="Revelio local API")
 app.add_middleware(
@@ -32,6 +35,14 @@ class InvestigationRequest(BaseModel):
 MAX_UPLOAD_COUNT = 3
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_UPLOAD_BYTES = 25 * 1024 * 1024
+IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+@dataclass
+class UploadedImage:
+    title: str
+    media_type: str
+    content: bytes
 
 
 @app.get("/api/health")
@@ -56,6 +67,7 @@ async def investigate_with_documents(
 
     parser = DocumentParser()
     documents = []
+    images = []
     total_bytes = 0
     for index, upload in enumerate(files, start=1):
         try:
@@ -65,22 +77,29 @@ async def investigate_with_documents(
                 raise HTTPException(status_code=413, detail=f"{upload.filename or 'A file'} exceeds the 10 MB limit.")
             if total_bytes > MAX_TOTAL_UPLOAD_BYTES:
                 raise HTTPException(status_code=413, detail="Combined uploads exceed the 25 MB limit.")
-            try:
-                document = parser.parse_upload(upload.filename or "document", content)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            documents.append(document.model_copy(update={"url": f"upload://{index}/{document.title}"}))
+            filename = upload.filename or "document"
+            media_type = upload.content_type or mimetypes.guess_type(filename)[0]
+            if media_type in IMAGE_TYPES:
+                images.append(UploadedImage(title=filename, media_type=media_type, content=content))
+                if len(images) > 3:
+                    raise HTTPException(status_code=400, detail="Upload up to three images per investigation.")
+            else:
+                try:
+                    document = parser.parse_upload(filename, content)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                documents.append(document.model_copy(update={"url": f"upload://{index}/{document.title}"}))
         finally:
             await upload.close()
-    return _stream_investigation(goal.strip(), documents)
+    return _stream_investigation(goal.strip(), documents, images)
 
 
-def _stream_investigation(goal: str, documents=None) -> StreamingResponse:
+def _stream_investigation(goal: str, documents=None, images=None) -> StreamingResponse:
     events: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
     def worker() -> None:
         try:
-            state = run(goal, on_event=events.put, documents=documents)
+            state = run(goal, on_event=events.put, documents=documents, images=images)
             events.put({"event": "result", "state": state.model_dump(mode="json")})
         except Exception as exc:
             events.put({"event": "failed", "error": str(exc)})

@@ -1,4 +1,5 @@
 import json
+from typing import Callable
 
 from app.services.llm import LLMService
 from app.investigator.models import Evidence, Finding
@@ -55,8 +56,8 @@ response_format = {
 
 class EvidenceVerifier:
 
-    def __init__(self):
-        self.llm = LLMService()
+    def __init__(self, on_usage: Callable[[dict], None] | None = None):
+        self.llm = LLMService(on_usage=on_usage)
 
     def verify(
         self,

@@ -1,6 +1,8 @@
 import hashlib
 import json
 from pathlib import Path
+from time import perf_counter
+from typing import Callable
 
 from groq import Groq
 
@@ -9,7 +11,7 @@ from app.core.config import settings
 
 class LLMService:
 
-    def __init__(self):
+    def __init__(self, on_usage: Callable[[dict], None] | None = None):
         self.client = Groq(
             api_key=settings.groq_api_key
         )
@@ -17,6 +19,7 @@ class LLMService:
         self.model = "openai/gpt-oss-20b"
 
         self.cache_enabled = settings.llm_cache_enabled
+        self.on_usage = on_usage
 
         self.cache_dir = Path("app/cache/llm")
         self.cache_dir.mkdir(
@@ -65,6 +68,15 @@ class LLMService:
             ) as f:
                 cached_response = json.load(f)
 
+            self._report_usage({
+                "model": self.model,
+                "cache_hit": True,
+                "latency_seconds": 0,
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+            })
+
             return cached_response["content"]
 
         # -------------------------
@@ -81,6 +93,7 @@ class LLMService:
         if response_format is not None:
             request["response_format"] = response_format
 
+        started = perf_counter()
         try:
             response = self.client.chat.completions.create(**request)
         except Exception as exc:
@@ -93,11 +106,42 @@ class LLMService:
                 # still parse and validate the resulting object themselves.
                 print("[LLM] Schema validation failed; retrying in JSON object mode")
                 request["response_format"] = {"type": "json_object"}
-                response = self.client.chat.completions.create(**request)
+                try:
+                    response = self.client.chat.completions.create(**request)
+                except Exception:
+                    self._report_usage({
+                        "model": self.model,
+                        "cache_hit": False,
+                        "failed": True,
+                        "latency_seconds": round(perf_counter() - started, 3),
+                        "prompt_tokens": None,
+                        "completion_tokens": None,
+                        "total_tokens": None,
+                    })
+                    raise
             else:
+                self._report_usage({
+                    "model": self.model,
+                    "cache_hit": False,
+                    "failed": True,
+                    "latency_seconds": round(perf_counter() - started, 3),
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "total_tokens": None,
+                })
                 raise
 
         content = response.choices[0].message.content
+        usage = response.usage
+        self._report_usage({
+            "model": self.model,
+            "cache_hit": False,
+            "failed": False,
+            "latency_seconds": round(perf_counter() - started, 3),
+            "prompt_tokens": getattr(usage, "prompt_tokens", None),
+            "completion_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        })
 
         # -------------------------
         # Save response locally
@@ -122,3 +166,10 @@ class LLMService:
             print("[LLM] Response cached")
 
         return content
+
+    def _report_usage(self, details: dict) -> None:
+        if self.on_usage is not None:
+            try:
+                self.on_usage(details)
+            except Exception as exc:
+                print(f"[LLM] Could not report usage telemetry: {exc}")

@@ -12,11 +12,13 @@ def run(
     goal: str,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     documents: list[Document] | None = None,
+    images=None,
 ) -> AgentState:
     documents = documents or []
+    images = images or []
     # Pure arithmetic should not spend an LLM call deciding to use Python.
     expression = expression_from_goal(goal)
-    if expression is not None and not documents:
+    if expression is not None and not documents and not images:
         if on_event:
             on_event({"event": "started", "goal": goal})
             on_event({"event": "tool_started", "tool": "calculator", "arguments": {"expression": expression}})
@@ -77,13 +79,20 @@ def run(
         }
         for document in documents
     ]
-    state = AgentState(
-        goal=goal,
-        observations=[AgentObservation(tool="document", success=True, output=source_items)] if source_items else [],
-    )
+    image_items = [
+        {"title": image.title, "image_index": index, "media_type": image.media_type}
+        for index, image in enumerate(images)
+    ]
+    initial_observations = []
+    if source_items:
+        initial_observations.append(AgentObservation(tool="document", success=True, output=source_items))
+    if image_items:
+        initial_observations.append(AgentObservation(tool="image", success=True, output=image_items))
+    state = AgentState(goal=goal, observations=initial_observations)
     registry = build_capability_registry(
         on_event=on_event,
         uploaded_documents={document.url: document for document in documents},
+        uploaded_images=images,
     )
     agent = Agent(capabilities=registry, on_event=on_event)
     return agent.run(state)

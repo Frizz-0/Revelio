@@ -66,19 +66,26 @@ class CapabilityRegistry:
 def build_capability_registry(
     on_event: Callable[[dict[str, Any]], None] | None = None,
     uploaded_documents: dict[str, Document] | None = None,
+    uploaded_images: list[Any] | None = None,
 ) -> CapabilityRegistry:
     """Wire the three capabilities used by the V2 investigation agent."""
     registry = CapabilityRegistry()
     search_provider = SearXNGProvider()
     fetcher = DocumentFetcher()
     parser = DocumentParser()
-    extractor = EvidenceExtractor()
-    verifier = EvidenceVerifier()
     uploaded_documents = uploaded_documents or {}
+    uploaded_images = uploaded_images or []
 
     def emit(event: str, **details: Any) -> None:
         if on_event is not None:
             on_event({"event": event, **details})
+
+    extractor = EvidenceExtractor(
+        on_usage=lambda details: emit("model_usage", stage="evidence_extraction", **details)
+    )
+    verifier = EvidenceVerifier(
+        on_usage=lambda details: emit("model_usage", stage="evidence_verification", **details)
+    )
 
     def search(query: str):
         results = [result.model_dump() for result in search_provider.search(query)]
@@ -240,4 +247,39 @@ def build_capability_registry(
             "additionalProperties": False,
         },
     ))
+    if uploaded_images:
+        from app.services.vision_service import VisionService
+
+        vision = VisionService(
+            on_usage=lambda details: emit("model_usage", stage="vision_analysis", **details)
+        )
+
+        def analyze_image(image_index: int, task: str):
+            if image_index < 0 or image_index >= len(uploaded_images):
+                raise ValueError(f"Image index must be between 0 and {len(uploaded_images) - 1}.")
+            image = uploaded_images[image_index]
+            emit("vision_analysis_started", title=image.title, image_index=image_index, task=task)
+            try:
+                result = vision.analyze(image.title, image.media_type, image.content, task)
+            except Exception as exc:
+                emit("vision_analysis_finished", title=image.title, image_index=image_index, success=False, error=str(exc))
+                raise
+            result.update({"title": image.title, "image_index": image_index, "basis": "AI visual observation; not independently verified"})
+            emit("vision_analysis_finished", title=image.title, image_index=image_index, success=True, suggested_route=result["suggested_route"])
+            return result
+
+        registry.register(Capability(
+            name="analyze_image",
+            description="Inspect an attached image with the vision model. Use it for visual questions, visible text, charts, diagrams, or objects. It returns AI observations, not independently verified source evidence.",
+            execute=analyze_image,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "image_index": {"type": "integer", "minimum": 0, "maximum": len(uploaded_images) - 1},
+                    "task": {"type": "string", "minLength": 1},
+                },
+                "required": ["image_index", "task"],
+                "additionalProperties": False,
+            },
+        ))
     return registry

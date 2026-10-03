@@ -51,7 +51,9 @@ class Agent:
         self.capabilities = capabilities
         self.max_tool_calls = max_tool_calls
         self.on_event = on_event
-        self.model = LLMService()
+        self.model = LLMService(
+            on_usage=lambda details: self._emit("model_usage", stage="agent_decision", **details)
+        )
 
     def _emit(self, event: str, **details: Any) -> None:
         if self.on_event is not None:
@@ -73,7 +75,12 @@ class Agent:
                     "a complete non-empty response, tool=null, and arguments={}. "
                     "Never calculate exact arithmetic yourself: call calculator "
                     "and use its observed result. For factual research, inspect "
-                    "uploaded documents first when present, and search for outside "
+                    "attached images first when present by calling analyze_image "
+                    "with the next unprocessed image_index from its metadata. Analyze "
+                    "each attached image once before choosing a follow-up action. Visual observations "
+                    "are model-generated and are not independently verified quotes. "
+                    "Use outside search when the user asks for facts beyond what is "
+                    "visible in the image. Inspect uploaded documents first when present, and search for outside "
                     "corroboration or gaps when useful; otherwise search first and "
                     "research those actual search observations. "
                     "Research fetches source "
@@ -335,6 +342,12 @@ class Agent:
         )
         if documents:
             self._emit("documents_loaded", documents=documents)
+        images = next(
+            (item.output for item in state.observations if item.tool == "image" and item.success),
+            [],
+        )
+        if images:
+            self._emit("images_loaded", images=images)
 
         while not state.finished:
             state.iteration += 1
@@ -351,6 +364,29 @@ class Agent:
                 state.status = "failed"
                 self._emit("failed", error=message, state=state.model_dump(mode="json"))
                 break
+            analyzed_images = {
+                observation.output.get("image_index")
+                for observation in state.observations
+                if observation.tool == "analyze_image"
+                and observation.success
+                and isinstance(observation.output, dict)
+            }
+            next_image_index = next(
+                (image.get("image_index") for image in images if image.get("image_index") not in analyzed_images),
+                None,
+            )
+            if next_image_index is not None and (
+                action.action_type != "tool"
+                or action.tool != "analyze_image"
+                or action.arguments.get("image_index") != next_image_index
+            ):
+                action = AgentAction(
+                    action_type="tool",
+                    tool="analyze_image",
+                    arguments={"image_index": next_image_index, "task": state.goal},
+                    reason="Inspect every attached image before choosing follow-up analysis.",
+                )
+                print(f"[Agent] Routing attached image {next_image_index} through vision analysis before follow-up decisions.")
             self._emit(
                 "action_selected",
                 step=state.iteration,
@@ -368,9 +404,11 @@ class Agent:
                     o.tool == "calculator" and o.success for o in state.observations
                 ):
                     error = "Use calculator and observe its result before answering the requested calculation."
-                elif not self._available_sources(state):
+                elif not self._available_sources(state) and not any(
+                    o.tool == "analyze_image" and o.success for o in state.observations
+                ):
                     error = "Provide documents or search for evidence before answering an investigation goal."
-                elif not any(
+                elif self._available_sources(state) and not any(
                     o.tool == "research" and o.success for o in state.observations
                 ):
                     error = "Analyze and verify the collected search evidence with research before answering."
@@ -502,6 +540,22 @@ class Agent:
                 )
                 print(f"[Tool] {action.tool} failed; error={exc}")
             state.observations.append(observation)
+            if (
+                action.tool == "analyze_image"
+                and not observation.success
+                and ("rate_limit_exceeded" in (observation.error or "") or "429" in (observation.error or ""))
+            ):
+                state.status = "failed"
+                state.final_answer = (
+                    "Image analysis was rate-limited by Groq. Wait for the quota window to reset, "
+                    "then try again."
+                )
+                self._emit(
+                    "failed",
+                    error=state.final_answer,
+                    state=state.model_dump(mode="json"),
+                )
+                break
 
         if state.status == "running":
             state.status = "failed"

@@ -1,0 +1,25 @@
+/* Font settings: change these two variables to restyle the entire interface. */
+:root {
+  --font-ui: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-note: "Caveat", "Segoe Print", cursive;
+}
+
+/* Product UI, controls, metadata and evidence use the clean interface font. */
+:root, body, button, input, textarea,
+.console-topbar, .console-sidebar,
+.board-heading, .board-question-label, .board-count,
+.board-lead-title, .board-lead-domain, .board-lead-state, .board-lead-number,
+.board-question small, .board-photo figcaption,
+.journal-heading > div > span, .journal-live, .journal-intro,
+.journal-entries button .text-zinc-300, .journal-entries button .text-zinc-500,
+.readout-label, .readout-detail, .answer-panel > :nth-child(2),
+.quote-card, .quote-card a, .quote-claim,
+.activity-panel button .text-zinc-300 {
+  font-family: var(--font-ui) !important;
+}
+
+/* Handwriting appears only on note-like insights and notebook copy. */
+.pencil-insight p,
+.notebook-page .handwritten {
+  font-family: var(--font-note) !important;
+}
